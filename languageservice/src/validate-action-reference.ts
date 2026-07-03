@@ -9,8 +9,12 @@ import {mapRange} from "./utils/range.js";
 import {ValidationConfig} from "./validate.js";
 
 export const DiagnosticCode = {
-  MissingRequiredInputs: "missing-required-inputs"
+  MissingRequiredInputs: "missing-required-inputs",
+  ActionMetadataAuthError: "action-metadata-auth-error"
 } as const;
+
+const ActionMetadataAuthErrorMessage =
+  "Unable to resolve action `%ACTION%` due to a GitHub authentication error (401/403). Refresh credentials and try again.";
 
 export interface MissingInputsDiagnosticData {
   action: ActionReference;
@@ -42,6 +46,17 @@ export async function validateActionReference(
   // Fetch the action's metadata (action.yml) to get input definitions
   const actionMetadata = await config.actionsMetadataProvider.fetchActionMetadata(action);
   if (actionMetadata === undefined) {
+    const metadataError = config.actionsMetadataErrorProvider?.getActionMetadataError(action);
+    if (metadataError === "auth") {
+      diagnostics.push({
+        severity: DiagnosticSeverity.Warning,
+        range: mapRange(step.uses.range),
+        code: DiagnosticCode.ActionMetadataAuthError,
+        message: ActionMetadataAuthErrorMessage.replace("%ACTION%", step.uses.value)
+      });
+      return;
+    }
+
     diagnostics.push({
       severity: DiagnosticSeverity.Error,
       range: mapRange(step.uses.range),

@@ -39,10 +39,11 @@ import {getFileProvider} from "./file-provider.js";
 import {InitializationOptions, RepositoryContext} from "./initializationOptions.js";
 import {onCompletion} from "./on-completion.js";
 import {ReadFileRequest, Requests} from "./request.js";
-import {getActionsMetadataProvider} from "./utils/action-metadata.js";
+import {getActionMetadataError, getActionsMetadataProvider} from "./utils/action-metadata.js";
 import {TTLCache} from "./utils/cache.js";
 import {timeOperation} from "./utils/timer.js";
 import {valueProviders} from "./value-providers.js";
+import {actionIdentifier, ActionReference} from "@actions/languageservice/action";
 
 export function initConnection(connection: Connection) {
   const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
@@ -53,6 +54,8 @@ export function initConnection(connection: Connection) {
 
   let hasWorkspaceFolderCapability = false;
   let featureFlags = new FeatureFlags();
+  let sessionTokenRefreshRequest: string | undefined;
+  let initOptions: InitializationOptions = {};
 
   // Register remote console logger with language service
   registerLogger(connection.console);
@@ -63,10 +66,13 @@ export function initConnection(connection: Connection) {
     hasWorkspaceFolderCapability = !!(capabilities.workspace && !!capabilities.workspace.workspaceFolders);
 
     const options = params.initializationOptions as InitializationOptions;
+    initOptions = options;
 
     if (options.sessionToken) {
       client = getClient(options.sessionToken, options.userAgent, options.gitHubApiUrl);
     }
+
+    sessionTokenRefreshRequest = options.sessionTokenRefreshRequest;
 
     if (options.repos) {
       repos = options.repos;
@@ -129,11 +135,47 @@ export function initConnection(connection: Connection) {
 
   async function validateTextDocument(textDocument: TextDocument): Promise<void> {
     const repoContext = repos.find(repo => textDocument.uri.startsWith(repo.workspaceUri));
+    const actionAuthErrors = new Set<string>();
+
+    const onAuthError = (action: ActionReference) => {
+      actionAuthErrors.add(actionIdentifier(action));
+    };
+
+    const onActionFetchSuccess = (action: ActionReference) => {
+      actionAuthErrors.delete(actionIdentifier(action));
+    };
+
+    const onActionFetchFailure = (action: ActionReference) => {
+      const id = actionIdentifier(action);
+      if (!client || getActionMetadataError(client, action) !== "auth") {
+        actionAuthErrors.delete(id);
+      }
+    };
 
     const config: ValidationConfig = {
       valueProviderConfig: valueProviders(client, repoContext, cache),
       contextProviderConfig: contextProviders(client, repoContext, cache),
-      actionsMetadataProvider: getActionsMetadataProvider(client, cache),
+      actionsMetadataProvider: getActionsMetadataProvider(client, cache, {
+        refreshSessionToken: sessionTokenRefreshRequest
+          ? async () =>
+              await connection.sendRequest<string | undefined>(sessionTokenRefreshRequest as string, {
+                reason: "Action metadata lookup returned 401/403"
+              })
+          : undefined,
+        onAuthError,
+        onActionFetchSuccess,
+        onActionFetchFailure,
+        setClient: refreshed => {
+          client = refreshed;
+        },
+        userAgent: initOptions.userAgent,
+        gitHubApiUrl: initOptions.gitHubApiUrl
+      }),
+      actionsMetadataErrorProvider: {
+        getActionMetadataError(action: ActionReference) {
+          return actionAuthErrors.has(actionIdentifier(action)) ? "auth" : undefined;
+        }
+      },
       fileProvider: getFileProvider(client, cache, repoContext?.workspaceUri, async path => {
         return await connection.sendRequest(Requests.ReadFile, {path} satisfies ReadFileRequest);
       }),

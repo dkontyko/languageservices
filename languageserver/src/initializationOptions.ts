@@ -11,6 +11,14 @@ export interface InitializationOptions {
   sessionToken?: string;
 
   /**
+   * Optional custom LSP request name used by the server to ask the client for a refreshed session token
+   * after receiving a 401/403 while fetching remote metadata.
+   *
+   * If omitted, no token refresh retry is attempted.
+   */
+  sessionTokenRefreshRequest?: string;
+
+  /**
    * Optional user agent to use when making calls to github.com
    */
   userAgent?: string;

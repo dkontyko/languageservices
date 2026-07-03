@@ -1,5 +1,5 @@
 import {DiagnosticSeverity} from "vscode-languageserver-types";
-import {ActionMetadata, ActionReference} from "./action.js";
+import {actionIdentifier, ActionMetadata, ActionReference} from "./action.js";
 import {registerLogger} from "./log.js";
 import {createDocument} from "./test-utils/document.js";
 import {TestLogger} from "./test-utils/logger.js";
@@ -143,6 +143,47 @@ jobs:
           }
         },
         severity: DiagnosticSeverity.Error
+      }
+    ]);
+  });
+
+  it("action metadata auth error", async () => {
+    const input = `
+    on: push
+    jobs:
+      build:
+        runs-on: ubuntu-latest
+        steps:
+        - uses: actions/does-not-exist@v3
+    `;
+
+    const authErrorConfig: ValidationConfig = {
+      ...validationConfig,
+      actionsMetadataErrorProvider: {
+        getActionMetadataError(action: ActionReference) {
+          return actionIdentifier(action) === "actions/does-not-exist/v3" ? "auth" : undefined;
+        }
+      }
+    };
+
+    const result = await validate(createDocument("wf.yaml", input), authErrorConfig);
+
+    expect(result).toEqual([
+      {
+        message:
+          "Unable to resolve action `actions/does-not-exist@v3` due to a GitHub authentication error (401/403). Refresh credentials and try again.",
+        range: {
+          end: {
+            character: 41,
+            line: 6
+          },
+          start: {
+            character: 16,
+            line: 6
+          }
+        },
+        severity: DiagnosticSeverity.Warning,
+        code: "action-metadata-auth-error"
       }
     ]);
   });

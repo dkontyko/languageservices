@@ -47,12 +47,19 @@ export type ValidationConfig = {
   valueProviderConfig?: ValueProviderConfig;
   contextProviderConfig?: ContextProviderConfig;
   actionsMetadataProvider?: ActionsMetadataProvider;
+  actionsMetadataErrorProvider?: ActionsMetadataErrorProvider;
   fileProvider?: FileProvider;
   featureFlags?: FeatureFlags;
 };
 
 export type ActionsMetadataProvider = {
   fetchActionMetadata(action: ActionReference): Promise<ActionMetadata | undefined>;
+};
+
+export type ActionMetadataErrorCode = "auth";
+
+export type ActionsMetadataErrorProvider = {
+  getActionMetadataError(action: ActionReference): ActionMetadataErrorCode | undefined;
 };
 
 /**

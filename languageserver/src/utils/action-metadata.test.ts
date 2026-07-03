@@ -1,6 +1,6 @@
 import {Octokit} from "@octokit/rest";
 import fetchMock from "fetch-mock";
-import {fetchActionMetadata} from "./action-metadata.js";
+import {fetchActionMetadata, getActionMetadataError, getActionsMetadataProvider} from "./action-metadata.js";
 import {TTLCache} from "./cache.js";
 
 // A simplified version of the action.yml file from actions/checkout
@@ -138,6 +138,69 @@ describe("fetchActionMetadata", () => {
     const metadata = await fetchActionWithMock(mock);
 
     expect(metadata).toBeUndefined();
+  });
+
+  it("classifies auth failures", async () => {
+    const client = new Octokit({
+      request: {
+        fetch: fetchMock
+          .sandbox()
+          .getOnce("https://api.github.com/repos/actions/checkout/contents/action.yml?ref=v3", 401)
+      }
+    });
+
+    const metadata = await fetchActionMetadata(client, new TTLCache(), {
+      owner: "actions",
+      name: "checkout",
+      ref: "v3"
+    });
+
+    expect(metadata).toBeUndefined();
+    expect(
+      getActionMetadataError(client, {
+        owner: "actions",
+        name: "checkout",
+        ref: "v3"
+      })
+    ).toBe("auth");
+  });
+
+  it("refreshes token and retries once on auth error", async () => {
+    const firstClientFetch = fetchMock
+      .sandbox()
+      .getOnce("https://api.github.com/repos/actions/checkout/contents/action.yml?ref=v3", 401);
+
+    const secondClientFetch = fetchMock
+      .sandbox()
+      .getOnce("https://api.github.com/repos/actions/checkout/contents/action.yml?ref=v3", actionMetadata);
+
+    const activeClient = new Octokit({
+      request: {
+        fetch: firstClientFetch
+      }
+    });
+
+    const refreshedClient = new Octokit({
+      request: {
+        fetch: secondClientFetch
+      }
+    });
+
+    const cache = new TTLCache();
+    const provider = getActionsMetadataProvider(activeClient, cache, {
+      refreshSessionToken: async () => "new-token",
+      createClient: () => refreshedClient
+    });
+
+    const metadata = await provider?.fetchActionMetadata({
+      owner: "actions",
+      name: "checkout",
+      ref: "v3"
+    });
+
+    expect(metadata?.inputs?.repository?.description).toEqual(
+      "Repository name with owner. For example, actions/checkout"
+    );
   });
 
   it("handles invalid actions", async () => {

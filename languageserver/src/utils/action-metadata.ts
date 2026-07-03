@@ -6,16 +6,81 @@ import {parse} from "yaml";
 import {TTLCache} from "./cache.js";
 import {errorMessage, errorStatus} from "./error.js";
 
+export type ActionMetadataProviderOptions = {
+  refreshSessionToken?: () => Promise<string | undefined>;
+  onAuthError?: (action: ActionReference) => void;
+  onActionFetchSuccess?: (action: ActionReference) => void;
+  onActionFetchFailure?: (action: ActionReference) => void;
+  setClient?: (client: Octokit) => void;
+  userAgent?: string;
+  gitHubApiUrl?: string;
+  createClient?: (token: string) => Octokit;
+};
+
+const actionMetadataErrors = new WeakMap<Octokit, Map<string, "auth">>();
+
+function isAuthError(e: unknown): boolean {
+  const status = errorStatus(e);
+  return status === 401 || status === 403;
+}
+
 export function getActionsMetadataProvider(
   client: Octokit | undefined,
-  cache: TTLCache
+  cache: TTLCache,
+  options?: ActionMetadataProviderOptions
 ): ActionsMetadataProvider | undefined {
   if (!client) {
     return undefined;
   }
 
+  let currentClient = client;
+
   return {
-    fetchActionMetadata: async action => fetchActionMetadata(client, cache, action)
+    fetchActionMetadata: async action => {
+      const metadata = await fetchActionMetadata(currentClient, cache, action);
+      if (metadata !== undefined) {
+        options?.onActionFetchSuccess?.(action);
+        return metadata;
+      }
+
+      const errorCode = getActionMetadataError(currentClient, action);
+      if (errorCode !== "auth") {
+        options?.onActionFetchFailure?.(action);
+        return undefined;
+      }
+
+      options?.onAuthError?.(action);
+      const refreshedToken = await options?.refreshSessionToken?.();
+      if (!refreshedToken) {
+        options?.onActionFetchFailure?.(action);
+        return undefined;
+      }
+
+      currentClient =
+        options?.createClient?.(refreshedToken) ||
+        new Octokit({
+          auth: refreshedToken,
+          userAgent: options?.userAgent || "GitHub Actions Language Server",
+          baseUrl: options?.gitHubApiUrl
+        });
+      options?.setClient?.(currentClient);
+
+      // Clear cache to avoid retaining stale auth-derived misses.
+      cache.clear();
+
+      const retried = await fetchActionMetadata(currentClient, cache, action);
+      if (retried !== undefined) {
+        options?.onActionFetchSuccess?.(action);
+        return retried;
+      }
+
+      const retryErrorCode = getActionMetadataError(currentClient, action);
+      if (retryErrorCode === "auth") {
+        options?.onAuthError?.(action);
+      }
+      options?.onActionFetchFailure?.(action);
+      return undefined;
+    }
   };
 }
 
@@ -57,8 +122,32 @@ async function getActionMetadata(client: Octokit, action: ActionReference): Prom
   return Buffer.from(resp.data.content, "base64").toString("utf8");
 }
 
+export function getActionMetadataError(client: Octokit, action: ActionReference): "auth" | undefined {
+  const errors = actionMetadataErrors.get(client);
+  if (!errors) {
+    return undefined;
+  }
+  return errors.get(actionIdentifier(action));
+}
+
+function setActionMetadataError(client: Octokit, action: ActionReference, code: "auth" | undefined): void {
+  const key = actionIdentifier(action);
+  let errors = actionMetadataErrors.get(client);
+  if (!errors) {
+    errors = new Map<string, "auth">();
+    actionMetadataErrors.set(client, errors);
+  }
+
+  if (code) {
+    errors.set(key, code);
+  } else {
+    errors.delete(key);
+  }
+}
+
 async function fetchAction(client: Octokit, action: ActionReference) {
   try {
+    setActionMetadataError(client, action, undefined);
     return await client.repos.getContent({
       owner: action.owner,
       repo: action.name,
@@ -66,6 +155,10 @@ async function fetchAction(client: Octokit, action: ActionReference) {
       path: action.path ? `${action.path}/action.yml` : "action.yml"
     });
   } catch (e) {
+    if (isAuthError(e)) {
+      setActionMetadataError(client, action, "auth");
+    }
+
     // If action.yml doesn't exist, try action.yaml
     if (errorStatus(e) === 404) {
       return await client.repos.getContent({
