@@ -21,7 +21,14 @@ const actionMetadataErrors = new WeakMap<Octokit, Map<string, "auth">>();
 
 function isAuthError(e: unknown): boolean {
   const status = errorStatus(e);
-  return status === 401 || status === 403;
+  return status === 401;
+}
+
+const bearerTokenPattern = /Bearer\s+[A-Za-z0-9._~+/=-]+/gi;
+const tokenAssignmentPattern = /([Tt]oken\s*[=:]\s*)([^\s'"`]+)/g;
+
+export function sanitizeErrorForLogs(message: string): string {
+  return message.replace(bearerTokenPattern, "Bearer [REDACTED]").replace(tokenAssignmentPattern, "$1[REDACTED]");
 }
 
 export function getActionsMetadataProvider(
@@ -34,6 +41,7 @@ export function getActionsMetadataProvider(
   }
 
   let currentClient = client;
+  let authRetryAttempted = false;
 
   return {
     fetchActionMetadata: async action => {
@@ -44,12 +52,13 @@ export function getActionsMetadataProvider(
       }
 
       const errorCode = getActionMetadataError(currentClient, action);
-      if (errorCode !== "auth") {
+      if (errorCode !== "auth" || authRetryAttempted) {
         options?.onActionFetchFailure?.(action);
         return undefined;
       }
 
       options?.onAuthError?.(action);
+      authRetryAttempted = true;
       const refreshedToken = await options?.refreshSessionToken?.();
       if (!refreshedToken) {
         options?.onActionFetchFailure?.(action);
@@ -105,7 +114,8 @@ async function getActionMetadata(client: Octokit, action: ActionReference): Prom
   try {
     resp = await fetchAction(client, action);
   } catch (e) {
-    error(`Failed to fetch action metadata for ${actionIdentifier(action)}: '${errorMessage(e)}'`);
+    const safeErrorMessage = sanitizeErrorForLogs(errorMessage(e));
+    error(`Failed to fetch action metadata for ${actionIdentifier(action)}: '${safeErrorMessage}'`);
     return;
   }
 

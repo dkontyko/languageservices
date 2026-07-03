@@ -1,6 +1,6 @@
 import {Octokit} from "@octokit/rest";
 import fetchMock from "fetch-mock";
-import {fetchActionMetadata, getActionMetadataError, getActionsMetadataProvider} from "./action-metadata.js";
+import {fetchActionMetadata, getActionMetadataError, getActionsMetadataProvider, sanitizeErrorForLogs} from "./action-metadata.js";
 import {TTLCache} from "./cache.js";
 
 // A simplified version of the action.yml file from actions/checkout
@@ -130,14 +130,33 @@ describe("fetchActionMetadata", () => {
     );
   });
 
+  // Behavior under test is not changed. The test is updated to
+  // actually create the client and ensure that 403 error handling
+  // remains the same as before.
   it("does not fall back for other errors", async () => {
-    const mock = fetchMock
-      .sandbox()
-      .getOnce("https://api.github.com/repos/actions/checkout/contents/action.yml?ref=v3", 403);
+    const client = new Octokit({
+      request: {
+        fetch: fetchMock
+          .sandbox()
+          .getOnce("https://api.github.com/repos/actions/checkout/contents/action.yml?ref=v3", 403)
+      }
+    });
 
-    const metadata = await fetchActionWithMock(mock);
+    const metadata = await fetchActionMetadata(client, new TTLCache(), {
+      owner: "actions",
+      name: "checkout",
+      ref: "v3"
+    });
 
     expect(metadata).toBeUndefined();
+    // 403 is intentionally excluded from refresh/retry to avoid re-auth loops; only 401 triggers refresh logic.
+    expect(
+      getActionMetadataError(client, {
+        owner: "actions",
+        name: "checkout",
+        ref: "v3"
+      })
+    ).toBeUndefined();
   });
 
   it("classifies auth failures", async () => {
@@ -201,6 +220,61 @@ describe("fetchActionMetadata", () => {
     expect(metadata?.inputs?.repository?.description).toEqual(
       "Repository name with owner. For example, actions/checkout"
     );
+  });
+
+  it("retries auth refresh only once per provider", async () => {
+    const firstClientFetch = fetchMock
+      .sandbox()
+      .get("https://api.github.com/repos/actions/checkout/contents/action.yml?ref=v3", 401);
+
+    const activeClient = new Octokit({
+      request: {
+        fetch: firstClientFetch
+      }
+    });
+
+    let refreshCalls = 0;
+    const provider = getActionsMetadataProvider(activeClient, new TTLCache(), {
+      refreshSessionToken: async () => {
+        refreshCalls += 1;
+        return "new-token";
+      },
+      createClient: () =>
+        new Octokit({
+          request: {
+            fetch: fetchMock
+              .sandbox()
+              .get("https://api.github.com/repos/actions/checkout/contents/action.yml?ref=v3", 401)
+          }
+        })
+    });
+
+    await provider?.fetchActionMetadata({
+      owner: "actions",
+      name: "checkout",
+      ref: "v3"
+    });
+
+    await provider?.fetchActionMetadata({
+      owner: "actions",
+      name: "checkout",
+      ref: "v3"
+    });
+
+    expect(refreshCalls).toBe(1);
+  });
+
+  it("sanitizes token-like values in error messages", () => {
+    const original =
+      "Bad credentials, Authorization: Bearer ghp_secret123 token=ghu_anotherSecret token:ghs_thirdSecret";
+    const sanitized = sanitizeErrorForLogs(original);
+
+    expect(sanitized).toContain("Bearer [REDACTED]");
+    expect(sanitized).toContain("token=[REDACTED]");
+    expect(sanitized).toContain("token:[REDACTED]");
+    expect(sanitized).not.toContain("ghp_secret123");
+    expect(sanitized).not.toContain("ghu_anotherSecret");
+    expect(sanitized).not.toContain("ghs_thirdSecret");
   });
 
   it("handles invalid actions", async () => {

@@ -14,7 +14,7 @@ export const DiagnosticCode = {
 } as const;
 
 const ActionMetadataAuthErrorMessage =
-  "Unable to resolve action `%ACTION%` due to a GitHub authentication error (401/403). Refresh credentials and try again.";
+  "Unable to resolve action `%ACTION%` due to a GitHub authentication error (401). Refresh credentials and try again.";
 
 export interface MissingInputsDiagnosticData {
   action: ActionReference;

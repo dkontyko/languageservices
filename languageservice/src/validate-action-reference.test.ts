@@ -171,7 +171,7 @@ jobs:
     expect(result).toEqual([
       {
         message:
-          "Unable to resolve action `actions/does-not-exist@v3` due to a GitHub authentication error (401/403). Refresh credentials and try again.",
+          "Unable to resolve action `actions/does-not-exist@v3` due to a GitHub authentication error (401). Refresh credentials and try again.",
         range: {
           end: {
             character: 41,

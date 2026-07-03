@@ -159,7 +159,7 @@ export function initConnection(connection: Connection) {
         refreshSessionToken: sessionTokenRefreshRequest
           ? async () =>
               await connection.sendRequest<string | undefined>(sessionTokenRefreshRequest as string, {
-                reason: "Action metadata lookup returned 401/403"
+                reason: "Action metadata lookup returned 401"
               })
           : undefined,
         onAuthError,
